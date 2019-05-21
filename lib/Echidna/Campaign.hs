@@ -25,6 +25,7 @@ import Data.Maybe (fromMaybe, isNothing, maybeToList)
 import Data.Ord (comparing)
 import Data.Has (Has(..))
 import Data.Set (Set, union)
+import Data.Semigroup
 import Data.Text (unpack)
 import EVM
 import EVM.Types (W256)
@@ -88,6 +89,7 @@ instance Semigroup Campaign where
 
 instance Monoid Campaign where
   mempty = Campaign mempty mempty mempty
+  mappend = (<>)
 
 -- | Given a 'Campaign', checks if we can attempt any solves or shrinks without exceeding
 -- the limits defined in our 'CampaignConf'.
@@ -138,10 +140,10 @@ evalSeq v e = go [] where
 
 -- | Execute a transaction, capturing the PC and codehash of each instruction executed, saving the
 -- transaction if it finds new coverage.
-execTxOptC :: (MonadState x m, Has Campaign x, Has VM x, MonadThrow m) => Tx -> m VMResult
-execTxOptC t = do
+execTxOptC :: (MonadState x m, Has Campaign x, Has VM x, MonadThrow m) => Integer -> Tx -> m VMResult
+execTxOptC g t = do
   og  <- hasLens . coverage <<.= mempty
-  res <- execTxWith vmExcept (usingCoverage $ pointCoverage (hasLens . coverage)) t
+  res <- execTxWith g vmExcept (usingCoverage $ pointCoverage (hasLens . coverage)) t
   hasLens . coverage %= unionWith union og
   grew <- (== LT) . comparing coveragePoints og <$> use (hasLens . coverage)
   when grew $ hasLens . genDict %= gaddCalls (lefts [t ^. call])
@@ -153,8 +155,9 @@ callseq :: ( MonadCatch m, MonadRandom m, MonadReader x m, MonadState y m
            , Has TestConf x, Has CampaignConf x, Has Campaign y)
         => VM -> World -> Int -> m ()
 callseq v w ql = do
-  ef <- bool execTx execTxOptC . isNothing . knownCoverage <$> view hasLens
   ca <- use hasLens
+  g  <- testMaxGas <$> view hasLens
+  ef <- bool (execTx g) (execTxOptC g) . isNothing . knownCoverage <$> view hasLens
   is <- replicateM ql (evalStateT genTxM (w, ca ^. genDict))
   execStateT (evalSeq v ef is) (v, ca) >>= assign hasLens . view _2
 

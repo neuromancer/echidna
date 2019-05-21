@@ -22,6 +22,7 @@ import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Vector (Vector)
 import Data.Word8 (Word8)
+import Data.Semigroup 
 import EVM.ABI (AbiType(..), AbiValue(..), abiValueType)
 import Numeric (showHex)
 
@@ -95,6 +96,7 @@ instance Semigroup GenDict where
 
 instance Monoid GenDict where
   mempty = mkGenDict 0 [] []
+  mappend = (<>)
 
 -- This instance is the only way for mkConf to work nicely, and is well-formed.
 {-# ANN module ("HLint: ignore Unused LANGUAGE pragma" :: String) #-}

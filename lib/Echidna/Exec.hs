@@ -17,7 +17,7 @@ import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import EVM
 import EVM.Exec (exec)
-import EVM.Types (W256(..))
+import EVM.Types (W256(..), Addr)
 
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -31,6 +31,7 @@ data ErrorClass = RevertE | IllegalE | UnknownE
 classifyError :: Error -> ErrorClass
 classifyError (Revert _)             = RevertE
 classifyError (UnrecognizedOpcode _) = RevertE
+classifyError (OutOfGas _ _)         = RevertE
 classifyError (Query _)              = RevertE
 classifyError StackUnderrun          = IllegalE
 classifyError BadJumpDestination     = IllegalE
@@ -60,23 +61,42 @@ instance Exception ExecException
 vmExcept :: MonadThrow m => Error -> m ()
 vmExcept e = throwM $ case VMFailure e of {Illegal -> IllegalExec e; _ -> UnknownFailure e}
 
+-- | replaceCodeOfSelf and replaceCode in hevm 0.29 do not allow to replace the code
+-- of an already deployed contracts. We need the previous versions of them, so we have them here:
+
+replaceCodeOfSelf' :: ContractCode -> EVM ()
+replaceCodeOfSelf' newCode = do
+  vm <- get
+  replaceCode' (view (state . contract) vm) newCode
+
+replaceCode' :: Addr -> ContractCode -> EVM ()
+replaceCode' target newCode =
+  zoom (env . contracts . at target) $ do
+    Just now <- get
+    put . Just $
+     initialContract newCode
+     & set storage (view storage now)
+     & set balance (view balance now)
+     & set nonce   (view nonce now)
+
 -- | Given an error handler, an execution function, and a transaction, execute that transaction
 -- using the given execution strategy, handling errors with the given handler.
-execTxWith :: (MonadState x m, Has VM x) => (Error -> m ()) -> m VMResult -> Tx -> m VMResult
-execTxWith h m t = do og <- get
-                      setupTx t
-                      res <- m
-                      case (res, isRight $ t ^. call) of
-                        (Reversion,   _)         -> put og
-                        (VMFailure x, _)         -> h x
-                        (VMSuccess bc, True) -> hasLens %= execState ( replaceCodeOfSelf bc
-                                                                        >> loadContract (t ^. dst))
-                        _                        -> pure ()
-                      return res
+execTxWith :: (MonadState x m, Has VM x) => Integer -> (Error -> m ()) -> m VMResult -> Tx -> m VMResult
+execTxWith g h m t = do setupTx g t
+                        res <- m
+                        case (res, isRight $ t ^. call) of
+                          (Reversion,   _)         -> return ()
+                          (VMFailure x, _)         -> h x
+                          (VMSuccess bc, True)     -> hasLens %= execState ( replaceCodeOfSelf' (RuntimeCode bc) >> loadContract (t ^. dst))
+                          _                        -> pure ()
+                        return res
 
 -- | Execute a transaction "as normal".
-execTx :: (MonadState x m, Has VM x, MonadThrow m) => Tx -> m VMResult
-execTx = execTxWith vmExcept $ liftSH exec
+execTx :: (MonadState x m, Has VM x, MonadThrow m) => Integer -> Tx -> m VMResult
+execTx g = execTxWith g vmExcept $ liftSH exec
+
+maxGas :: Integer
+maxGas = 0xffffffff
 
 -- | Given a way of capturing coverage info, execute while doing so once per instruction.
 usingCoverage :: (MonadState x m, Has VM x) => m () -> m VMResult
